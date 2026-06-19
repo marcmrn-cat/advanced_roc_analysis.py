@@ -1,0 +1,179 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import roc_curve, auc, confusion_matrix
+import os
+import argparse
+from typing import Tuple, Dict, Any, List
+
+# ==========================================
+# CONFIGURATION BLOCK
+# ==========================================
+CONFIG = {
+    "input_file": "clinical_data.xlsx",
+    "output_dir": "ROC_Analysis_Results",
+    "target_column": "Diagnosis",           # 1 for Disease, 0 for Healthy
+    "positive_class_label": 1,
+    "biomarkers": ["Biomarker_A", "Biomarker_B"], # Columns to evaluate
+    "n_bootstraps": 1000,                   # Iterations for Confidence Intervals
+    "alpha": 0.95,                          # 95% Confidence Interval
+    "plot_style": "whitegrid"               # Seaborn style for publication
+}
+
+# ==========================================
+# ADVANCED STATISTICAL FUNCTIONS
+# ==========================================
+
+def calculate_youden_index(y_true: np.ndarray, y_scores: np.ndarray) -> Dict[str, float]:
+    """Calculates the optimal cut-off point using Youden's J statistic."""
+    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+    youden_j = tpr - fpr
+    optimal_idx = np.argmax(youden_j)
+    
+    optimal_threshold = thresholds[optimal_idx]
+    sensitivity = tpr[optimal_idx]
+    specificity = 1 - fpr[optimal_idx]
+    
+    # Calculate predictive values at this threshold
+    y_pred = (y_scores >= optimal_threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    
+    ppv = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    npv = tn / (tn + fn) if (tn + fn) > 0 else 0.0
+    accuracy = (tp + tn) / (tp + tn + fp + fn)
+    
+    return {
+        "Optimal_Cutoff": optimal_threshold,
+        "Sensitivity": sensitivity,
+        "Specificity": specificity,
+        "PPV": ppv,
+        "NPV": npv,
+        "Accuracy": accuracy
+    }
+
+def calculate_auc_ci(y_true: np.ndarray, y_scores: np.ndarray, n_bootstraps: int, alpha: float) -> Tuple[float, float, float]:
+    """Calculates the AUC and its Confidence Interval using bootstrapping."""
+    original_auc = auc(*roc_curve(y_true, y_scores)[:2])
+    bootstrapped_scores = []
+    
+    rng = np.random.RandomState(42) # For reproducibility
+    for _ in range(n_bootstraps):
+        # Bootstrap sample
+        indices = rng.randint(0, len(y_pred), len(y_pred))
+        if len(np.unique(y_true[indices])) < 2:
+            continue # Skip iterations that don't have both classes
+            
+        score = auc(*roc_curve(y_true[indices], y_scores[indices])[:2])
+        bootstrapped_scores.append(score)
+        
+    sorted_scores = np.array(bootstrapped_scores)
+    sorted_scores.sort()
+    
+    lower_bound = np.percentile(sorted_scores, (1.0 - alpha) / 2.0 * 100)
+    upper_bound = np.percentile(sorted_scores, (alpha + ((1.0 - alpha) / 2.0)) * 100)
+    
+    return original_auc, lower_bound, upper_bound
+
+# ==========================================
+# MAIN EXECUTION PIPELINE
+# ==========================================
+
+def generate_mock_data() -> pd.DataFrame:
+    """Generates realistic synthetic clinical data for testing purposes."""
+    print("[!] Input file not found. Generating mock clinical data for demonstration...")
+    np.random.seed(42)
+    n_samples = 200
+    diagnosis = np.random.binomial(1, 0.4, n_samples)
+    
+    # Biomarker A (Good predictor)
+    marker_a = np.where(diagnosis == 1, np.random.normal(50, 15, n_samples), np.random.normal(25, 10, n_samples))
+    # Biomarker B (Weak predictor)
+    marker_b = np.where(diagnosis == 1, np.random.normal(30, 20, n_samples), np.random.normal(25, 20, n_samples))
+    
+    return pd.DataFrame({"Diagnosis": diagnosis, "Biomarker_A": marker_a, "Biomarker_B": marker_b})
+
+def main(input_path: str):
+    print(f"[*] Starting Advanced ROC-AUC Pipeline")
+    os.makedirs(CONFIG["output_dir"], exist_ok=True)
+    
+    try:
+        df = pd.read_excel(input_path)
+        print(f"[*] Loaded data from {input_path}")
+    except FileNotFoundError:
+        df = generate_mock_data()
+
+    y_true = df[CONFIG["target_column"]].values
+    
+    plt.figure(figsize=(10, 8))
+    sns.set_style(CONFIG["plot_style"])
+    
+    metrics_report = []
+    colors = sns.color_palette("husl", len(CONFIG["biomarkers"]))
+    
+    # Process each biomarker
+    for i, marker in enumerate(CONFIG["biomarkers"]):
+        print(f"[*] Evaluating {marker}...")
+        y_scores = df[marker].values
+        
+        # 1. ROC Curve coordinates
+        fpr, tpr, _ = roc_curve(y_true, y_scores)
+        
+        # 2. Bootstrapped AUC
+        roc_auc, ci_lower, ci_upper = calculate_auc_ci(y_true, y_scores, CONFIG["n_bootstraps"], CONFIG["alpha"])
+        
+        # 3. Clinical Metrics at Optimal Cut-off
+        metrics = calculate_youden_index(y_true, y_scores)
+        
+        metrics_report.append({
+            "Biomarker": marker,
+            "AUC": round(roc_auc, 4),
+            f"{int(CONFIG['alpha']*100)}% CI Lower": round(ci_lower, 4),
+            f"{int(CONFIG['alpha']*100)}% CI Upper": round(ci_upper, 4),
+            "Optimal Cut-off": round(metrics["Optimal_Cutoff"], 3),
+            "Sensitivity (%)": round(metrics["Sensitivity"] * 100, 2),
+            "Specificity (%)": round(metrics["Specificity"] * 100, 2),
+            "PPV (%)": round(metrics["PPV"] * 100, 2),
+            "NPV (%)": round(metrics["NPV"] * 100, 2)
+        })
+        
+        # Plotting
+        plt.plot(fpr, tpr, color=colors[i], lw=2.5, 
+                 label=f'{marker} (AUC = {roc_auc:.3f} [{ci_lower:.2f}-{ci_upper:.2f}])')
+        
+        # Mark optimal cut-off point on the curve
+        opt_fpr = 1 - metrics["Specificity"]
+        opt_tpr = metrics["Sensitivity"]
+        plt.scatter(opt_fpr, opt_tpr, color=colors[i], marker='*', s=150, zorder=5, edgecolor='black')
+
+    # Add Reference Line
+    plt.plot([0, 1], [0, 1], color='gray', lw=2, linestyle='--', label='Random Guess (AUC = 0.500)')
+    
+    # Graph Formatting
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate (1 - Specificity)', fontsize=12, fontweight='bold')
+    plt.ylabel('True Positive Rate (Sensitivity)', fontsize=12, fontweight='bold')
+    plt.title('Clinical Diagnostics: ROC Curve Comparison', fontsize=14, fontweight='bold', pad=15)
+    plt.legend(loc="lower right", frameon=True, shadow=True, fontsize=10)
+    plt.grid(True, linestyle=':', alpha=0.7)
+    
+    # Save Outputs
+    plot_path = os.path.join(CONFIG["output_dir"], "Multimarker_ROC_Curve.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    df_metrics = pd.DataFrame(metrics_report)
+    excel_path = os.path.join(CONFIG["output_dir"], "Clinical_Diagnostic_Metrics.xlsx")
+    df_metrics.to_excel(excel_path, index=False)
+    
+    print(f"\n[+] Processing complete! Results exported to: {CONFIG['output_dir']}")
+    print("-" * 50)
+    print(df_metrics.to_string(index=False))
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Advanced Clinical ROC-AUC Analysis")
+    parser.add_argument("--input", type=str, default=CONFIG["input_file"], 
+                        help="Path to the clinical dataset (.xlsx)")
+    args = parser.parse_args()
+    main(args.input)
